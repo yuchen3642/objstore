@@ -7,15 +7,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"github.com/efficientgo/core/errcapture"
-	"github.com/pkg/errors"
-	"github.com/pkg/xattr"
-	"gopkg.in/yaml.v2"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+
+	"github.com/efficientgo/core/errcapture"
+	"github.com/pkg/errors"
+	"github.com/pkg/xattr"
+	"gopkg.in/yaml.v2"
 
 	"github.com/thanos-io/objstore"
 )
@@ -287,22 +288,6 @@ func openSwap(name string) (swf *os.File, err error) {
 	}
 }
 
-func tryOpenFile(name string, ifNotExists bool) (exists bool, err error) {
-	// First try to open the file with exclusive create, then truncate if permitted
-	flags := os.O_RDWR | os.O_CREATE | os.O_EXCL
-	var f *os.File
-	f, err = os.OpenFile(name, flags, 0666)
-	if errors.Is(err, fs.ErrExist) && !ifNotExists {
-		exists = true
-		flags = os.O_RDWR | os.O_CREATE | os.O_APPEND
-		f, err = os.OpenFile(name, flags, 0666)
-	}
-	if err != nil && f != nil {
-		err = f.Close()
-	}
-	return
-}
-
 // Upload writes the file specified in src to into the memory.
 func (b *Bucket) Upload(ctx context.Context, name string, r io.Reader, opts ...objstore.ObjectUploadOption) (err error) {
 
@@ -337,9 +322,15 @@ func (b *Bucket) Upload(ctx context.Context, name string, r io.Reader, opts ...o
 	defer errcapture.Do(&err, swf.Close, "close")
 	defer errcapture.Do(&err, clearSwap, "remove swap")
 
-	exists, err := tryOpenFile(file, params.IfNotExists)
-	if err != nil {
-		return err
+	// Determine existence under swap lock; honor IfNotExists by returning fs.ErrExist.
+	exists := false
+	if _, statErr := os.Stat(file); statErr == nil {
+		exists = true
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
+	if params.IfNotExists && exists {
+		return fs.ErrExist
 	}
 
 	if err := b.checkConditions(name, params, exists); err != nil {
